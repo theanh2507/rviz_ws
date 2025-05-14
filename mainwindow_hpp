@@ -1,0 +1,78 @@
+#ifndef MAINWINDOW_H
+#define MAINWINDOW_H
+
+#include <QMainWindow>
+#include "rclcpp/rclcpp.hpp"
+
+#include "rviz_common/display.hpp"
+#include "rviz_common/render_panel.hpp"
+#include "rviz_rendering/render_window.hpp"
+#include "rviz_common/ros_integration/ros_node_abstraction.hpp"
+#include "rviz_common/visualization_manager.hpp"
+#include "rviz_common/window_manager_interface.hpp"
+
+
+#include <nav2_map_server/map_server.hpp>
+#include <rclcpp/executors.hpp>
+#include <memory>
+#include <QProcess>
+
+
+
+QT_BEGIN_NAMESPACE
+namespace Ui { class MainWindow; }
+namespace rviz_common
+{
+    class Display;
+    class RenderPanel;
+    class VisualizationManager;
+}
+QT_END_NAMESPACE
+
+class MainWindow : public QMainWindow
+{
+    Q_OBJECT
+
+public:
+    MainWindow(QApplication * app, QWidget *parent = nullptr);
+    ~MainWindow();
+
+    void initial();
+    void setupRobotModelDisplay();
+    void setmap();
+    void setView(const QString &view_mode);
+    void set_nav();
+
+private:
+    Ui::MainWindow *ui;
+    QApplication * _app;
+
+    std::shared_ptr<rviz_common::ros_integration::RosNodeAbstraction> _rvizRosNodeTmp;
+    rviz_common::ros_integration::RosNodeAbstractionIface::WeakPtr _rvizRosNode;
+    
+    std::shared_ptr<rviz_common::VisualizationManager> _manager;
+    std::shared_ptr<rviz_common::RenderPanel> _render_panel;
+
+
+    rviz_common::Display * _grid;
+    rviz_common::Display * _pointcloud;
+    rviz_common::Display * robot_model_display;
+    rviz_common::Display * map_display = nullptr;
+
+    std::shared_ptr<nav2_map_server::MapServer> map_server_;
+    std::shared_ptr<rclcpp::executors::SingleThreadedExecutor> map_executor_;
+    std::thread map_spin_thread_;
+
+    QProcess *mapProcess = nullptr;
+    QProcess *lifecycleProcess = nullptr;
+    QProcess *navProcess = nullptr;
+
+    rviz_common::Tool *initial_pose_tool = nullptr;
+    rviz_common::Tool *nav_goal_tool = nullptr;
+
+
+
+
+
+};
+#endif // MAINWINDOW_H
