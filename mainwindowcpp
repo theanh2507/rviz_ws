@@ -1,0 +1,305 @@
+#include "mainwindow.h"
+#include "./ui_mainwindow.h"
+
+
+#include <rviz_rendering/render_window.hpp>
+#include <QVector3D>
+#include <QDebug>
+#include <rviz_common/tool_manager.hpp>
+#include <rviz_common/view_manager.hpp>
+
+
+#include <QProcess>
+#include <QThread>
+
+MainWindow::MainWindow(QApplication * app, QWidget *parent)
+    : QMainWindow(parent)
+    , ui(new Ui::MainWindow)
+    , _app(app)
+{
+    ui->setupUi(this);
+
+    initial();
+    setupRobotModelDisplay();
+    setmap();
+    set_nav();
+
+    connect(ui->comboBox, &QComboBox::currentTextChanged, this, &MainWindow::setmap);
+    
+    connect(ui->pushButton_6, &QPushButton::clicked, this, [=](){
+        setView("2D");
+    });
+    
+    connect(ui->pushButton_7, &QPushButton::clicked, this, [=](){
+        setView("3D");
+    });
+
+    connect(ui->pushButton, &QPushButton::clicked, this, [=]() {
+        _manager->getToolManager()->setCurrentTool(initial_pose_tool);
+    });
+
+    connect(ui->pushButton_2, &QPushButton::clicked, this, [=]() {
+        _manager->getToolManager()->setCurrentTool(nav_goal_tool);
+    });
+
+
+    
+    
+}
+
+MainWindow::~MainWindow()
+{
+    kill(0, SIGINT);                            // dung toan bo tien trinh
+    delete ui;
+    // delete _manager;
+    // delete _render_panel;
+}
+
+
+void MainWindow::initial()
+{
+    _rvizRosNodeTmp = std::make_shared<rviz_common::ros_integration::RosNodeAbstraction>("rviz_render_node");
+    _rvizRosNode = _rvizRosNodeTmp;
+
+    QApplication::processEvents();                                          // tranh treo UI trong luc khoi tao rviz
+    _render_panel = std::make_shared<rviz_common::RenderPanel>();           // khoi tao rendel panel hien thi rviz
+    QApplication::processEvents();
+    _render_panel->getRenderWindow()->initialize();
+
+    rviz_common::WindowManagerInterface * wm = nullptr;
+    auto clock = _rvizRosNode.lock()->get_raw_node()->get_clock();
+    _manager = std::make_shared<rviz_common::VisualizationManager>(_render_panel.get(), _rvizRosNode, wm, clock);
+    _render_panel->initialize(_manager.get());
+    QApplication::processEvents();
+
+    _manager->setFixedFrame("/map");
+    _manager->initialize();
+    _manager->startUpdate();
+
+    ui->scrollArea->setWidget(_render_panel.get());
+
+    // 添加网格显示
+    _grid = _manager->createDisplay("rviz_default_plugins/Grid", "adjustable grid", true);
+    if (_grid == NULL) {
+        throw std::runtime_error("Error creating grid display");
+    }
+
+    // 配置网格样式
+    _grid->subProp("Line Style")->setValue("Billboards");
+    _grid->subProp("Line Style")->subProp("Line Width")->setValue(0.02f);
+    _grid->subProp("Color")->setValue(QColor(Qt::white));
+    _grid->subProp("Cell Size")->setValue(1.0f);
+
+    // 添加点云显示
+    _pointcloud = _manager->createDisplay("rviz_default_plugins/LaserScan", "scan", true);
+    if (_pointcloud == NULL) {
+        throw std::runtime_error("Error creating pointcloud display");
+    }
+
+    // 配置点云样式
+    _pointcloud->subProp("Topic")->setValue("/scan");
+    _pointcloud->subProp("Style")->setValue("Points");
+    _pointcloud->subProp("Size (Pixels)")->setValue(2);
+    _pointcloud->subProp("Color Transformer")->setValue("Intensity");
+    _pointcloud->subProp("Invert Rainbow")->setValue("true");
+    _pointcloud->subProp("Decay Time")->setValue("0.1");
+
+
+    // ##########################################
+    _render_panel->setMouseTracking(true);
+    _render_panel->setFocusPolicy(Qt::StrongFocus);
+
+    // Set the view controller to Orbit to allow for mouse interactions
+    _manager->getViewManager()->setCurrentViewControllerType("rviz_default_plugins/Orbit");
+
+    // Retrieve the active view controller to set properties and confirm it's set up correctly
+    auto orbit_view_controller = _manager->getViewManager()->getCurrent();
+    if (!orbit_view_controller) {
+        qDebug() << "Orbit view controller could not be set.";
+        return;
+    }
+
+    qDebug() << "Orbit view controller initialized successfully.";
+
+    // Set default distance and focal point for the camera
+    orbit_view_controller->subProp("Distance")->setValue(10.0);
+    orbit_view_controller->subProp("Focal Point")->setValue(QVariant::fromValue(QVector3D(0.0, 0.0, 0.0)));
+
+    // Set initial orientation of the camera
+    orbit_view_controller->subProp("Pitch")->setValue(1.5708);  // Example angle in radians
+    orbit_view_controller->subProp("Yaw")->setValue(3.14);      // Example angle in radians
+
+    // Set Interact tool as the active tool to enable mouse interactions
+    auto tool_manager = _manager->getToolManager();
+    tool_manager->setCurrentTool(tool_manager->addTool("rviz_default_plugins/Interact"));
+}
+
+
+void MainWindow::setupRobotModelDisplay()
+{
+    robot_model_display = _manager->createDisplay("rviz_default_plugins/RobotModel", "RobotModel Display", true);
+    
+    if(robot_model_display)
+    {
+        robot_model_display -> subProp("Description Topic")->setValue("/robot_description");
+        qDebug() << "RobotModel display configured for /robot_description topic.";
+    }
+
+    else
+    {
+        qDebug() << "Failed to create RobotModel display.";
+    }
+}
+
+
+
+void MainWindow::setmap()
+{
+    auto name_map = ui->comboBox->currentText();
+
+    // Xác định file map
+    QString map_yaml;
+    if (name_map == "map1")
+        map_yaml = "/home/theanh/maps/my_map.yaml";
+    else if (name_map == "map2")
+        map_yaml = "/home/theanh/maps/map_test_wall.yaml";
+    else if (name_map == "map3")
+        map_yaml = "/home/theanh/maps/my_map.yaml";
+    else
+        return;
+
+
+    // Dừng và xóa tiến trình map_server cũ nếu có
+    if (mapProcess)
+    {
+        mapProcess->kill();
+        mapProcess->waitForFinished(1000);
+        delete mapProcess;
+        mapProcess = nullptr;
+    }
+
+    // Dừng và xóa tiến trình lifecycle_manager cũ nếu có
+    if (lifecycleProcess)
+    {
+        lifecycleProcess->kill();
+        lifecycleProcess->waitForFinished(1000);
+        delete lifecycleProcess;
+        lifecycleProcess = nullptr;
+    }
+
+    mapProcess = new QProcess(this);
+    lifecycleProcess = new QProcess(this);
+    navProcess = new QProcess(this);
+
+    // --- Chạy map_server ---
+    QStringList mapArgs;
+    mapArgs << "run"
+            << "nav2_map_server"
+            << "map_server"
+            << "--ros-args"
+            << "-p" << QString("yaml_filename:=%1").arg(map_yaml);
+
+    mapProcess->setProgram("ros2");
+    mapProcess->setArguments(mapArgs);
+    mapProcess->start();
+
+    if (!mapProcess->waitForStarted(3000)) {
+        qDebug() << "Can't start map_server";
+        return;
+    }
+    qDebug() << "map_server start";
+
+    // --- Chạy lifecycle_manager ---
+    QStringList lifecycleArgs;
+    lifecycleArgs << "run"
+                << "nav2_lifecycle_manager"
+                << "lifecycle_manager"
+                << "--ros-args"
+                << "-p" << "use_sim_time:=true"
+                << "-p" << "autostart:=true"
+                << "-p" << "node_names:=['map_server']";
+
+    lifecycleProcess->setProgram("ros2");
+    lifecycleProcess->setArguments(lifecycleArgs);
+    lifecycleProcess->start();
+
+    if (!lifecycleProcess->waitForStarted(3000)) {
+        qDebug() << "Không thể khởi động lifecycle_manager";
+        return;
+    }
+    qDebug() << "lifecycle_manager đã được khởi động";
+
+
+    QStringList nav_args;
+    nav_args << "launch"
+        << "turtlebot3_navigation2"
+        << "navigation2.launch.py"
+        << "use_sim_time:=true"
+        << QString("map:=%1").arg(map_yaml);
+            
+
+    navProcess->setProgram("ros2");
+    navProcess->setArguments(nav_args);
+    navProcess->start();
+
+
+    if (!navProcess->waitForStarted(3000)) {
+        qDebug() << "Không thể khởi động lifecycle_manager";
+        return;
+    }
+    qDebug() << "lifecycle_manager đã được khởi động";
+
+    // Xóa map display cũ trong RViz (nếu có)
+    // if (_manager->getDisplay("Map Display"))
+    // {
+    //     _manager->removeAllDisplays();
+    // }
+
+    // Cấu hình hiển thị Map trong RViz
+    auto map_display = _manager->createDisplay("rviz_default_plugins/Map", "Map Display", true);
+    if (map_display)
+    {
+        map_display->subProp("Topic")->setValue("/map");
+        qDebug() << "RViz show map.";
+        QApplication::processEvents();
+    }
+    else
+    {
+        qDebug() << "Can't create map.";
+    }
+
+}
+
+
+void MainWindow::setView(const QString &view_mode)
+{
+    if(view_mode == "2D")
+    {
+        _manager->getViewManager()->setCurrentViewControllerType("rviz_default_plugins/TopDownOrtho");
+        _manager->getViewManager()->getCurrent()->subProp("Scale")->setValue(40);
+    }
+
+    else if(view_mode == "3D")
+    {
+        _manager->getViewManager()->setCurrentViewControllerType("rviz_default_plugins/Orbit");
+    }
+    else
+    {
+        qDebug() << "Fail to set View";
+    }
+}
+
+void MainWindow::set_nav()
+{
+    auto tool_manager = _manager->getToolManager();
+    initial_pose_tool = tool_manager->addTool("rviz_default_plugins/SetInitialPose");
+    nav_goal_tool = tool_manager->addTool("rviz_default_plugins/SetGoal");
+
+    initial_pose_tool->setName("InitialPose");
+    nav_goal_tool->setName("NavGoal");
+
+
+}
+
+
+
